@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlightView</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { height:100%; }
+body { font-family:monospace; background:#0a0e14; color:#c8d8e8; display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+header { display:flex; align-items:center; gap:6px; padding:8px 14px; background:#111820; border-bottom:1px solid #1e2a38; flex-shrink:0; flex-wrap:wrap; }
+h1 { font-size:.95rem; font-weight:bold; color:#fff; letter-spacing:.08em; margin-right:6px; }
+h1 span { color:#00d4ff; }
+.sep { width:1px; height:18px; background:#1e2a38; margin:0 4px; flex-shrink:0; }
+button {
+  background:#0a0e14; border:1px solid #1e2a38; color:#c8d8e8;
+  font-family:monospace; font-size:.72rem; padding:5px 11px;
+  border-radius:3px; cursor:pointer; white-space:nowrap;
+}
+button:hover { border-color:#00d4ff; color:#00d4ff; }
+button.ok   { border-color:#ff6b35; color:#ff6b35; }
+button.on   { background:#00d4ff; border-color:#00d4ff; color:#0a0e14; font-weight:bold; }
+#map { flex:1; width:100%; min-height:0; }
+#info {
+  position:fixed; bottom:24px; left:14px; z-index:1000;
+  background:rgba(10,14,20,.93); border:1px solid #1e2a38;
+  padding:10px 14px; font-size:.7rem; line-height:1.9;
+  border-radius:4px; display:none;
+}
+.row { display:flex; gap:14px; }
+.lbl { color:#4a6070; }
+#toast {
+  position:fixed; top:56px; left:50%; transform:translateX(-50%);
+  background:#111820; border:1px solid #00d4ff; color:#00d4ff;
+  padding:5px 16px; font-size:.72rem; border-radius:3px;
+  z-index:9999; display:none;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>FLIGHT<span>VIEW</span></h1>
+  <button id="btn-igc">IGC laden</button>
+  <button id="btn-cup">CUP laden</button>
+  <button onclick="fitAll()">Ansicht</button>
+  <button onclick="resetAll()">Reset</button>
+  <div class="sep"></div>
+  <button id="l-osm"  class="on"  onclick="setLayer('osm')">OSM</button>
+  <button id="l-topo"            onclick="setLayer('topo')">Topo</button>
+  <button id="l-sat"             onclick="setLayer('sat')">Satellit</button>
+  <button id="l-dark"            onclick="setLayer('dark')">Dark</button>
+</header>
+
+<input type="file" id="f-igc" style="display:none">
+<input type="file" id="f-cup" style="display:none">
+<div id="map"></div>
+<div id="info">
+  <div class="row"><span class="lbl">Pilot&nbsp;&nbsp;</span><span id="s-pilot"></span></div>
+  <div class="row"><span class="lbl">Datum&nbsp;&nbsp;</span><span id="s-date"></span></div>
+  <div class="row"><span class="lbl">Glider&nbsp;</span><span id="s-glider"></span></div>
+  <div class="row"><span class="lbl">Punkte&nbsp;</span><span id="s-pts"></span></div>
+  <div class="row"><span class="lbl">Max Alt</span><span id="s-alt"></span></div>
+  <div class="row"><span class="lbl">Wegpkt&nbsp;</span><span id="s-wpts"></span></div>
+</div>
+<div id="toast"></div>
+
+<script>
+var TILES = {
+  osm:  'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  topo: 'https://tile.opentopomap.org/{z}/{x}/{y}.png',
+  sat:  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  dark: 'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'
+};
+var ATTR = {
+  osm:  '&copy; OpenStreetMap contributors',
+  topo: '&copy; OpenStreetMap contributors, &copy; OpenTopoMap',
+  sat:  '&copy; Esri, Maxar',
+  dark: '&copy; OpenStreetMap contributors, &copy; CARTO'
+};
+
+var map       = L.map('map', { zoomControl:true }).setView([47.0, 10.5], 8);
+var tileLayer = L.tileLayer(TILES.osm, { attribution:ATTR.osm, maxZoom:19 }).addTo(map);
+var wptGroup  = L.layerGroup().addTo(map);
+var trackLine = null;
+var activeKey = 'osm';
+
+function setLayer(key) {
+  map.removeLayer(tileLayer);
+  tileLayer = L.tileLayer(TILES[key], { attribution:ATTR[key], maxZoom:19 }).addTo(map);
+  if (trackLine) trackLine.bringToFront();
+  ['osm','topo','sat','dark'].forEach(function(k) {
+    document.getElementById('l-'+k).className = k===key ? 'on' : '';
+  });
+  activeKey = key;
+}
+
+// File pickers
+document.getElementById('btn-igc').onclick = function(){ document.getElementById('f-igc').click(); };
+document.getElementById('btn-cup').onclick = function(){ document.getElementById('f-cup').click(); };
+
+document.getElementById('f-igc').onchange = function(e) {
+  var f = e.target.files[0]; if (!f) return;
+  var r = new FileReader();
+  r.onload = function(ev) { loadIGC(ev.target.result, f.name); };
+  r.readAsText(f, 'utf-8');
+  e.target.value = '';
+};
+
+document.getElementById('f-cup').onchange = function(e) {
+  var f = e.target.files[0]; if (!f) return;
+  var r = new FileReader();
+  r.onload = function(ev) { loadCUP(ev.target.result, f.name); };
+  r.readAsText(f, 'utf-8');
+  e.target.value = '';
+};
+
+// IGC parser
+function loadIGC(txt, fname) {
+  var lines = txt.split(/\r?\n/);
+  var pts = [];
+  var meta = { pilot:'—', date:'—', glider:'—' };
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i];
+    if (/^HF.?PLT/i.test(l)) meta.pilot  = l.split(':').slice(1).join(':').trim() || '—';
+    if (/^HF.?DTE/i.test(l)) {
+      var m = l.match(/(\d\d)(\d\d)(\d\d)/);
+      if (m) { var y = +m[3]>50 ? 1900+(+m[3]) : 2000+(+m[3]); meta.date = m[1]+'.'+m[2]+'.'+y; }
+    }
+    if (/^HF.?GTY/i.test(l)) meta.glider = l.split(':').slice(1).join(':').trim() || '—';
+    if (l.charAt(0) === 'B' && l.length >= 35) {
+      var lat = parseDMM(l.substr(7,7),  l.charAt(14));
+      var lon = parseDMM(l.substr(15,8), l.charAt(23));
+      var alt = parseInt(l.substr(25,5)) || parseInt(l.substr(30,5)) || 0;
+      if (lat !== null && lon !== null) pts.push([lat, lon, alt]);
+    }
+  }
+  if (!pts.length) { showToast('Keine B-Records gefunden'); return; }
+  if (trackLine) map.removeLayer(trackLine);
+  var lls = pts.map(function(p){ return [p[0],p[1]]; });
+  trackLine = L.polyline(lls, { color:'#00d4ff', weight:2.5, opacity:.9 }).addTo(map);
+  addDot(lls[0], '#00ff88', 'Start');
+  addDot(lls[lls.length-1], '#ff3366', 'Ziel');
+  var maxAlt = pts.reduce(function(a,p){ return Math.max(a,p[2]); }, 0);
+  set('s-pilot',  meta.pilot);
+  set('s-date',   meta.date);
+  set('s-glider', meta.glider);
+  set('s-pts',    pts.length.toLocaleString('de'));
+  set('s-alt',    maxAlt > 0 ? maxAlt+' m' : '—');
+  document.getElementById('info').style.display = 'block';
+  document.getElementById('btn-igc').textContent = fname;
+  document.getElementById('btn-igc').className = 'ok';
+  fitAll(); showToast(pts.length+' Trackpunkte geladen');
+}
+
+function parseDMM(s, h) {
+  var deg, min;
+  if (s.length === 7) { deg = +s.substr(0,2); min = +s.substr(2,2) + (+s.substr(4,3))/1000; }
+  else                { deg = +s.substr(0,3); min = +s.substr(3,2) + (+s.substr(5,3))/1000; }
+  var v = deg + min/60;
+  if (h==='S'||h==='W') v = -v;
+  return isNaN(v) ? null : v;
+}
+
+function addDot(ll, color, tip) {
+  var icon = L.divIcon({
+    html: '<div style="width:10px;height:10px;border-radius:50%;background:'+color+';border:2px solid #fff;box-shadow:0 0 5px '+color+'"></div>',
+    className:'', iconAnchor:[5,5]
+  });
+  L.marker(ll, {icon:icon}).bindTooltip(tip).addTo(map);
+}
+
+// CUP parser
+function loadCUP(txt, fname) {
+  var lines = txt.split(/\r?\n/);
+  var wpts = [];
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i].trim();
+    if (!l || l.indexOf('-----') === 0) break;
+    var cols = csvSplit(l);
+    if (cols.length < 5) continue;
+    var name = cols[0].replace(/^"|"$/g,'').trim();
+    if (!name || /^name$|^title$/i.test(name)) continue;
+    var code = (cols[1]||'').replace(/^"|"$/g,'').trim();
+    var latS = (cols[3]||'').replace(/^"|"$/g,'').trim();
+    var lonS = (cols[4]||'').replace(/^"|"$/g,'').trim();
+    var elev = (cols[5]||'').replace(/^"|"$/g,'').trim();
+    var lat = cupCoord(latS), lon = cupCoord(lonS);
+    if (lat !== null && lon !== null) wpts.push({name:name,code:code,lat:lat,lon:lon,elev:elev});
+  }
+  if (!wpts.length) { showToast('Keine Wegpunkte gefunden'); return; }
+  wptGroup.clearLayers();
+  wpts.forEach(function(w) {
+    var icon = L.divIcon({
+      html:'<div style="width:9px;height:9px;border-radius:50%;border:2px solid #ff6b35;box-shadow:0 0 4px rgba(255,107,53,.5)"></div>',
+      className:'', iconAnchor:[4,4]
+    });
+    L.marker([w.lat,w.lon], {icon:icon})
+      .bindTooltip('<b>'+w.name+'</b>'+(w.code?'<br>'+w.code:'')+(w.elev?'<br>'+w.elev:''), {direction:'top'})
+      .addTo(wptGroup);
+  });
+  set('s-wpts', wpts.length);
+  document.getElementById('info').style.display = 'block';
+  document.getElementById('btn-cup').textContent = fname;
+  document.getElementById('btn-cup').className = 'ok';
+  fitAll(); showToast(wpts.length+' Wegpunkte geladen');
+}
+
+function cupCoord(s) {
+  if (!s) return null;
+  var m = s.match(/^(\d+)(\d{2}\.\d+)([NSEWnsew])$/);
+  if (!m) return null;
+  var v = +m[1] + (+m[2])/60;
+  if (/[SsWw]/.test(m[3])) v = -v;
+  return isNaN(v) ? null : v;
+}
+
+function csvSplit(line) {
+  var res=[], cur='', inQ=false;
+  for (var i=0;i<line.length;i++) {
+    var c=line[i];
+    if (c==='"') inQ=!inQ;
+    else if (c===','&&!inQ) { res.push(cur); cur=''; }
+    else cur+=c;
+  }
+  res.push(cur); return res;
+}
+
+function fitAll() {
+  var bds=[];
+  if (trackLine) trackLine.getLatLngs().forEach(function(ll){bds.push([ll.lat,ll.lng]);});
+  wptGroup.eachLayer(function(l){if(l.getLatLng){var ll=l.getLatLng();bds.push([ll.lat,ll.lng]);}});
+  if (bds.length) map.fitBounds(L.latLngBounds(bds), {padding:[40,40]});
+}
+
+function resetAll() {
+  if (trackLine) { map.removeLayer(trackLine); trackLine=null; }
+  wptGroup.clearLayers();
+  document.getElementById('info').style.display='none';
+  document.getElementById('btn-igc').textContent='IGC laden'; document.getElementById('btn-igc').className='';
+  document.getElementById('btn-cup').textContent='CUP laden'; document.getElementById('btn-cup').className='';
+  ['s-pilot','s-date','s-glider','s-pts','s-alt','s-wpts'].forEach(function(id){set(id,'');});
+}
+
+var toastT;
+function showToast(msg) {
+  var t=document.getElementById('toast');
+  t.textContent=msg; t.style.display='block';
+  clearTimeout(toastT); toastT=setTimeout(function(){t.style.display='none';},3000);
+}
+function set(id,v){ document.getElementById(id).textContent=v; }
+</script>
+</body>
+</html>
